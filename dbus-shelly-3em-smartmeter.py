@@ -88,7 +88,7 @@ class DbusShelly3emService:
     self._lastUpdate = 0
  
     # add _update function 'timer'
-    gobject.timeout_add(2000, self._update) # pause 1000ms before the next request
+    gobject.timeout_add(500, self._update) # pause 500ms before the next request
     
     # add _signOfLife 'timer' to get feedback in log every 5minutes
     gobject.timeout_add(self._getSignOfLifeInterval()*60*1000, self._signOfLife)
@@ -222,9 +222,9 @@ class DbusShelly3emService:
        # New Version - from xris99
        #Calc = 60min * 60 sec / 0.500 (refresh interval of 500ms) * 1000
        if (self._dbusservice['/Ac/Power'] > 0):
-            self._dbusservice['/Ac/Energy/Forward'] = self._dbusservice['/Ac/Energy/Forward'] + (self._dbusservice['/Ac/Power']/(60*60/2.0*1000))            
+            self._dbusservice['/Ac/Energy/Forward'] = self._dbusservice['/Ac/Energy/Forward'] + (self._dbusservice['/Ac/Power']/(60*60/0.5*1000))            
        if (self._dbusservice['/Ac/Power'] < 0):
-            self._dbusservice['/Ac/Energy/Reverse'] = self._dbusservice['/Ac/Energy/Reverse'] + (self._dbusservice['/Ac/Power']*-1/(60*60/2.0*1000))
+            self._dbusservice['/Ac/Energy/Reverse'] = self._dbusservice['/Ac/Energy/Reverse'] + (self._dbusservice['/Ac/Power']*-1/(60*60/0.5*1000))
 
        
        #logging
