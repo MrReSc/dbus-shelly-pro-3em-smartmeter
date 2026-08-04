@@ -16,6 +16,11 @@ import sys
 import time
 import requests # for http GET
 import configparser # for config/ini file
+
+POLL_INTERVAL_MS = 500
+HTTP_TIMEOUT = (0.5, 0.5)
+DISCONNECT_AFTER_SECONDS = 2
+monotonic_time = getattr(time, 'monotonic', time.time)
  
 # our own packages from victron
 sys.path.insert(1, os.path.join(os.path.dirname(__file__), '/opt/victronenergy/dbus-systemcalc-py/ext/velib_python'))
@@ -86,9 +91,11 @@ class DbusShelly3emService:
 
     # last update
     self._lastUpdate = 0
+    self._lastSuccessfulUpdate = monotonic_time()
+    self._communicationError = False
  
     # add _update function 'timer'
-    gobject.timeout_add(300, self._update) # pause 300ms before the next request dont forgett row 225 and 227
+    gobject.timeout_add(POLL_INTERVAL_MS, self._update)
     
     # add _signOfLife 'timer' to get feedback in log every 5minutes
     gobject.timeout_add(self._getSignOfLifeInterval()*60*1000, self._signOfLife)
@@ -144,7 +151,7 @@ class DbusShelly3emService:
  
   def _getShellyData(self):
     URL = self._getShellyStatusUrl()
-    meter_r = requests.get(url = URL, timeout=5)
+    meter_r = requests.get(url = URL, timeout=HTTP_TIMEOUT)
     
     # check for response
     if not meter_r:
@@ -193,12 +200,25 @@ class DbusShelly3emService:
 
   def _update(self):   
     try:
-       #get data from Shelly 3em
-       meter_data = self._getShellyData()
-       phases = self._getPhases(meter_data)
+       try:
+          #get data from Shelly 3em
+          meter_data = self._getShellyData()
+          phases = self._getPhases(meter_data)
+          total_act_power = meter_data['em:0']['total_act_power']
+       except (ValueError, KeyError, TypeError, requests.exceptions.RequestException, ConnectionError) as e:
+          if not self._communicationError:
+             logging.warning('Error getting data from Shelly - check network or Shelly status. Details: %s', e)
+             self._communicationError = True
+
+          if (monotonic_time() - self._lastSuccessfulUpdate > DISCONNECT_AFTER_SECONDS and
+              self._dbusservice['/Connected'] != 0):
+             self._dbusservice['/Connected'] = 0
+             logging.error('No successful measurement from Shelly for more than %s seconds. Setting /Connected to 0.', DISCONNECT_AFTER_SECONDS)
+
+          return True
        
        #send data to DBus
-       self._dbusservice['/Ac/Power'] = meter_data['em:0']['total_act_power'] # positive: consumption, negative: feed into grid
+       self._dbusservice['/Ac/Power'] = total_act_power # positive: consumption, negative: feed into grid
        self._dbusservice['/Ac/L1/Voltage'] = phases[0].voltage
        self._dbusservice['/Ac/L2/Voltage'] = phases[1].voltage
        self._dbusservice['/Ac/L3/Voltage'] = phases[2].voltage
@@ -214,17 +234,15 @@ class DbusShelly3emService:
        self._dbusservice['/Ac/L1/Energy/Reverse'] = phases[0].total_act_ret_energy 
        self._dbusservice['/Ac/L2/Energy/Reverse'] = phases[1].total_act_ret_energy 
        self._dbusservice['/Ac/L3/Energy/Reverse'] = phases[2].total_act_ret_energy 
-       
-       # Old version
-       #self._dbusservice['/Ac/Energy/Forward'] = self._dbusservice['/Ac/L1/Energy/Forward'] + self._dbusservice['/Ac/L2/Energy/Forward'] + self._dbusservice['/Ac/L3/Energy/Forward']
-       #self._dbusservice['/Ac/Energy/Reverse'] = self._dbusservice['/Ac/L1/Energy/Reverse'] + self._dbusservice['/Ac/L2/Energy/Reverse'] + self._dbusservice['/Ac/L3/Energy/Reverse'] 
-       
-       # New Version - from xris99
-       #Calc = 60min * 60 sec / 0.300 (refresh interval of 300ms) * 1000
-       if (self._dbusservice['/Ac/Power'] > 0):
-            self._dbusservice['/Ac/Energy/Forward'] = self._dbusservice['/Ac/Energy/Forward'] + (self._dbusservice['/Ac/Power']/(60*60/0.3*1000))            
-       if (self._dbusservice['/Ac/Power'] < 0):
-            self._dbusservice['/Ac/Energy/Reverse'] = self._dbusservice['/Ac/Energy/Reverse'] + (self._dbusservice['/Ac/Power']*-1/(60*60/0.3*1000))
+       self._dbusservice['/Ac/Energy/Forward'] = sum(phase.total_act_energy for phase in phases)
+       self._dbusservice['/Ac/Energy/Reverse'] = sum(phase.total_act_ret_energy for phase in phases)
+
+       self._lastSuccessfulUpdate = monotonic_time()
+       if self._dbusservice['/Connected'] != 1:
+          self._dbusservice['/Connected'] = 1
+       if self._communicationError:
+          logging.info('Communication with Shelly restored.')
+          self._communicationError = False
 
        
        #logging
@@ -238,13 +256,6 @@ class DbusShelly3emService:
 
        #update lastupdate vars
        self._lastUpdate = time.time()
-    except (ValueError, requests.exceptions.ConnectionError, requests.exceptions.Timeout, ConnectionError) as e:
-       logging.critical('Error getting data from Shelly - check network or Shelly status. Setting power values to 0. Details: %s', e, exc_info=e)       
-       self._dbusservice['/Ac/L1/Power'] = 0                                       
-       self._dbusservice['/Ac/L2/Power'] = 0                                       
-       self._dbusservice['/Ac/L3/Power'] = 0
-       self._dbusservice['/Ac/Power'] = 0
-       self._dbusservice['/UpdateIndex'] = (self._dbusservice['/UpdateIndex'] + 1 ) % 256        
     except Exception as e:
        logging.critical('Error at %s', '_update', exc_info=e)
        
