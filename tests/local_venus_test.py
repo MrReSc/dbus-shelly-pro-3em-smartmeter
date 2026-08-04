@@ -4,6 +4,7 @@ import configparser
 import os
 from pathlib import Path
 import signal
+import shutil
 import subprocess
 import sys
 import time
@@ -14,6 +15,7 @@ import dbus
 BUS_ITEM_INTERFACE = 'com.victronenergy.BusItem'
 POLL_INTERVAL_SECONDS = 0.5
 STARTUP_TIMEOUT_SECONDS = 5
+TABLE_MAX_COLUMNS = 118
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 DRIVER = PROJECT_DIR / 'dbus-shelly-3em-smartmeter.py'
 CONFIG = PROJECT_DIR / 'config.ini'
@@ -77,6 +79,55 @@ def number(items, path, decimals=1):
     return '---'
 
 
+def printable(value):
+  if isinstance(value, (list, tuple)) and not value:
+    return '[]'
+  return str(value).replace('\r', '\\r').replace('\n', '\\n')
+
+
+def dbus_type(value):
+  return type(value).__name__
+
+
+def shortened(value, width):
+  if len(value) <= width:
+    return value
+  if width <= 3:
+    return value[:width]
+  return value[:width - 3] + '...'
+
+
+def table_lines(items, terminal_width=None):
+  rows = []
+  for path in sorted(items, key=str):
+    item = items[path]
+    item_value = item['Value']
+    rows.append((
+      str(path),
+      printable(item_value),
+      printable(item['Text']),
+      dbus_type(item_value),
+    ))
+
+  headers = ('Path', 'Value', 'Text', 'Type')
+  if terminal_width is None:
+    terminal_width = shutil.get_terminal_size(fallback=(TABLE_MAX_COLUMNS, 24)).columns
+  table_width = min(max(terminal_width, 72), TABLE_MAX_COLUMNS)
+
+  path_width = min(max([len(headers[0])] + [len(row[0]) for row in rows]), 24)
+  type_width = min(max([len(headers[3])] + [len(row[3]) for row in rows]), 10)
+  value_and_text_width = table_width - path_width - type_width - 9
+  value_width = value_and_text_width // 2
+  text_width = value_and_text_width - value_width
+  widths = (path_width, value_width, text_width, type_width)
+
+  def format_row(row):
+    return ' | '.join(shortened(column, widths[index]).ljust(widths[index]) for index, column in enumerate(row))
+
+  separator = '-+-'.join('-' * width for width in widths)
+  return [format_row(headers), separator] + [format_row(row) for row in rows]
+
+
 def live_line(items):
   phases = []
   for phase in (1, 2, 3):
@@ -101,25 +152,62 @@ def live_line(items):
   )
 
 
+def test_summary(state):
+  return 'startup=%s  updates=%s  disconnect=%s  recovery=%s' % (
+    'PASS' if state['online'] else 'WAITING',
+    'PASS' if state['updates'] else 'WAITING',
+    'PASS' if state['disconnected'] else 'NOT TESTED',
+    'PASS' if state['recovered'] else 'NOT TESTED',
+  )
+
+
 class Output:
   def __init__(self):
     self._interactive = sys.stdout.isatty()
-    self._line_width = 0
-    self._live_line_visible = False
+    self._last_event = 'Waiting for the driver to register its D-Bus service.'
 
-  def live(self, text):
+  def render(self, service_name, status, state, items=None):
     if self._interactive:
-      self._line_width = max(self._line_width, len(text))
-      sys.stdout.write('\r' + text.ljust(self._line_width))
+      lines = [
+        'Local Venus D-Bus view',
+        'Service:   %s' % service_name,
+        'Interface: %s' % BUS_ITEM_INTERFACE,
+        'Status:    %s    Time: %s    Paths: %d' % (
+          status,
+          time.strftime('%H:%M:%S'),
+          len(items) if items is not None else 0,
+        ),
+        'Tests:     %s' % test_summary(state),
+        'Last event: %s' % self._last_event,
+        'Disconnect the Shelly for more than 2 seconds, reconnect it, or press Ctrl+C to stop.',
+        '',
+      ]
+      if items is None:
+        lines.append('No D-Bus paths are available while the service is %s.' % status)
+      else:
+        lines.extend(table_lines(items))
+      sys.stdout.write('\033[2J\033[H' + '\n'.join(lines) + '\n')
       sys.stdout.flush()
-      self._live_line_visible = True
+    elif items is None:
+      print('%s  %s  no D-Bus paths available' % (time.strftime('%H:%M:%S'), status), flush=True)
     else:
-      print(text, flush=True)
+      print(live_line(items), flush=True)
+
+  def snapshot(self, title, service_name, state, items):
+    if self._interactive:
+      return
+    print('', flush=True)
+    print('D-Bus snapshot: %s' % title, flush=True)
+    print('Service: %s' % service_name, flush=True)
+    print('Interface: %s' % BUS_ITEM_INTERFACE, flush=True)
+    print('Paths: %d' % len(items), flush=True)
+    print('Tests: %s' % test_summary(state), flush=True)
+    for line in table_lines(items):
+      print(line, flush=True)
+    print('', flush=True)
 
   def event(self, text):
-    if self._interactive and self._live_line_visible:
-      sys.stdout.write('\n')
-      self._live_line_visible = False
+    self._last_event = text
     print(text, flush=True)
 
 
@@ -189,21 +277,25 @@ def run_test():
 
         previous_online = False
         if state['online']:
-          output.live('%s  OFFLINE  waiting for Shelly recovery' % time.strftime('%H:%M:%S'))
+          output.render(service_name, 'OFFLINE', state)
         else:
-          output.live('%s  STARTING  waiting for D-Bus service' % time.strftime('%H:%M:%S'))
+          output.render(service_name, 'STARTING', state)
         time.sleep(POLL_INTERVAL_SECONDS)
         continue
 
       validate_service(items)
       update_index = int(value(items, '/UpdateIndex'))
+      startup_snapshot = False
+      recovery_snapshot = False
 
       if not state['online']:
         output.event('[PASS] Service registered with all required paths and /Connected=1.')
         state['online'] = True
+        startup_snapshot = True
       elif not previous_online and state['disconnected']:
         output.event('[PASS] Service recovered with current values and /Connected=1.')
         state['recovered'] = True
+        recovery_snapshot = True
 
       if last_update_index is not None and update_index != last_update_index and not state['updates']:
         output.event('[PASS] UpdateIndex changes with successful measurements.')
@@ -211,7 +303,11 @@ def run_test():
 
       last_update_index = update_index
       previous_online = True
-      output.live(live_line(items))
+      if startup_snapshot:
+        output.snapshot('startup', service_name, state, items)
+      elif recovery_snapshot:
+        output.snapshot('recovery', service_name, state, items)
+      output.render(service_name, 'ONLINE', state, items)
       time.sleep(POLL_INTERVAL_SECONDS)
   except KeyboardInterrupt:
     output.event('Stopping local test...')

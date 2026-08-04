@@ -38,7 +38,7 @@ class Phase:
 
 
 class DbusShelly3emService:
-  def __init__(self, paths, productname='Shelly 3EM', connection='Shelly 3EM HTTP JSON service'):
+  def __init__(self, paths, productname='Shelly Pro 3EM', connection='Shelly Pro 3EM HTTP JSON service'):
     config = self._getConfig()
     self._paths = paths
     self._deviceinstance = int(config['DEFAULT']['DeviceInstance'])
@@ -160,7 +160,7 @@ class DbusShelly3emService:
     
     # check for response
     if not meter_r:
-        raise ConnectionError("No response from Shelly 3EM - %s" % (URL))
+        raise ConnectionError("No response from Shelly Pro 3EM - %s" % (URL))
     
     meter_data = meter_r.json()     
     
@@ -235,7 +235,7 @@ class DbusShelly3emService:
   def _update(self):   
     try:
        try:
-          #get data from Shelly 3em
+          #get data from Shelly Pro 3EM
           meter_data = self._getShellyData()
           phases = self._getPhases(meter_data)
           total_act_power = meter_data['em:0']['total_act_power']
