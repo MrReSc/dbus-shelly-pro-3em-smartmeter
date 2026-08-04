@@ -14,7 +14,6 @@ import dbus
 
 BUS_ITEM_INTERFACE = 'com.victronenergy.BusItem'
 POLL_INTERVAL_SECONDS = 0.5
-STARTUP_TIMEOUT_SECONDS = 5
 TABLE_MAX_COLUMNS = 118
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 DRIVER = PROJECT_DIR / 'dbus-shelly-3em-smartmeter.py'
@@ -247,7 +246,6 @@ def run_test():
   }
   previous_online = False
   last_update_index = None
-  startup_deadline = time.monotonic() + STARTUP_TIMEOUT_SECONDS
 
   output.event('Starting driver on private D-Bus: %s' % service_name)
   output.event('Disconnect the Shelly for more than 2 seconds, then reconnect it. Press Ctrl+C to stop.')
@@ -272,8 +270,6 @@ def run_test():
         if previous_online:
           output.event('[PASS] D-Bus service disappeared after communication loss.')
           state['disconnected'] = True
-        elif not state['online'] and time.monotonic() > startup_deadline:
-          raise TestFailure('D-Bus service did not appear within %d seconds' % STARTUP_TIMEOUT_SECONDS)
 
         previous_online = False
         if state['online']:

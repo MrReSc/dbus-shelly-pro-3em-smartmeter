@@ -53,20 +53,16 @@ class DbusShelly3emService:
     self._servicename = 'com.victronenergy.grid'
     self._productid = 45069
     self._position = self._getShellyPosition()
-    initial_meter_data = self._getShellyData()
-    self._serial = self._getShellySerial(initial_meter_data)
-    initial_phases = self._getPhases(initial_meter_data)
-    initial_measurements = self._getMeasurements(initial_meter_data, initial_phases)
-    initial_update_time = monotonic_time()
+    self._serial = None
     self._updateIndex = 0
-    self._lastPower = initial_measurements['/Ac/Power']
-    self._dbusservice = self._createDbusService(initial_measurements)
+    self._lastPower = None
+    self._dbusservice = None
 
     logging.debug("%s /DeviceInstance = %d" % (self._servicename, self._deviceinstance))
 
     # last update
     self._lastUpdate = 0
-    self._lastSuccessfulUpdate = initial_update_time
+    self._lastSuccessfulUpdate = None
     self._communicationError = False
 
     # add _update function 'timer'
@@ -238,14 +234,17 @@ class DbusShelly3emService:
           #get data from Shelly Pro 3EM
           meter_data = self._getShellyData()
           phases = self._getPhases(meter_data)
-          total_act_power = meter_data['em:0']['total_act_power']
+          measurements = self._getMeasurements(meter_data, phases)
+          if self._dbusservice is None:
+             serial = self._getShellySerial(meter_data)
        except (ValueError, KeyError, TypeError, requests.exceptions.RequestException, ConnectionError) as e:
           if not self._communicationError:
              logging.warning('Error getting data from Shelly - check network or Shelly status. Details: %s', e)
              self._communicationError = True
 
-          if (monotonic_time() - self._lastSuccessfulUpdate > DISCONNECT_AFTER_SECONDS and
-              self._dbusservice is not None):
+          if (self._dbusservice is not None and
+              self._lastSuccessfulUpdate is not None and
+              monotonic_time() - self._lastSuccessfulUpdate > DISCONNECT_AFTER_SECONDS):
              self._dbusservice['/Connected'] = 0
              self._dbusservice.__del__()
              self._dbusservice = None
@@ -253,16 +252,16 @@ class DbusShelly3emService:
 
           return True
        
-       measurements = self._getMeasurements(meter_data, phases)
        self._updateIndex = (self._updateIndex + 1) % 256
        if self._dbusservice is None:
+          self._serial = serial
           self._dbusservice = self._createDbusService(measurements)
        else:
           self._updateDbusValues(measurements)
           if self._dbusservice['/Connected'] != 1:
              self._dbusservice['/Connected'] = 1
 
-       self._lastPower = total_act_power
+       self._lastPower = measurements['/Ac/Power']
        self._lastSuccessfulUpdate = monotonic_time()
        if self._communicationError:
           logging.info('Communication with Shelly restored.')
