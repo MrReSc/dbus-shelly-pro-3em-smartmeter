@@ -21,7 +21,7 @@ POLL_INTERVAL_MS = 500
 HTTP_TIMEOUT = (0.5, 0.5)
 DISCONNECT_AFTER_SECONDS = 2
 monotonic_time = getattr(time, 'monotonic', time.time)
- 
+
 # our own packages from victron
 sys.path.insert(1, os.path.join(os.path.dirname(__file__), '/opt/victronenergy/dbus-systemcalc-py/ext/velib_python'))
 from vedbus import VeDbusService
@@ -40,65 +40,69 @@ class Phase:
 class DbusShelly3emService:
   def __init__(self, paths, productname='Shelly 3EM', connection='Shelly 3EM HTTP JSON service'):
     config = self._getConfig()
-    deviceinstance = int(config['DEFAULT']['DeviceInstance'])
-    customname = config['DEFAULT']['CustomName']
-    role = config['DEFAULT']['Role']
-
-    allowed_roles = ['pvinverter','grid']
-    if role in allowed_roles:
-        servicename = 'com.victronenergy.' + role
-    else:
-        logging.error("Configured Role: %s is not in the allowed list")
-        exit()
-
-    if role == 'pvinverter':
-        productid = 0xA144
-    else:
-        productid = 45069
-
-    self._dbusservice = VeDbusService("{}.http_{:02d}".format(servicename, deviceinstance), register=False)
     self._paths = paths
- 
-    logging.debug("%s /DeviceInstance = %d" % (servicename, deviceinstance))
- 
-    # Create the management objects, as specified in the ccgx dbus-api document
-    self._dbusservice.add_path('/Mgmt/ProcessName', __file__)
-    self._dbusservice.add_path('/Mgmt/ProcessVersion', 'Unkown version, and running on Python ' + platform.python_version())
-    self._dbusservice.add_path('/Mgmt/Connection', connection)
- 
-    # Create the mandatory objects
-    self._dbusservice.add_path('/DeviceInstance', deviceinstance)
-    self._dbusservice.add_path('/ProductId', productid)
-    self._dbusservice.add_path('/DeviceType', 345) # found on https://www.sascha-curth.de/projekte/005_Color_Control_GX.html#experiment - should be an ET340 Engerie Meter
-    self._dbusservice.add_path('/ProductName', productname)
-    self._dbusservice.add_path('/CustomName', customname)
-    self._dbusservice.add_path('/Latency', None)
-    self._dbusservice.add_path('/FirmwareVersion', 0.2)
-    self._dbusservice.add_path('/HardwareVersion', 0)
-    self._dbusservice.add_path('/Connected', 1)
-    self._dbusservice.add_path('/Role', role)
-    self._dbusservice.add_path('/Position', self._getShellyPosition()) # normaly only needed for pvinverter
-    self._dbusservice.add_path('/Serial', self._getShellySerial())
-    self._dbusservice.add_path('/UpdateIndex', 0)
- 
-    # add path values to dbus
-    for path, settings in self._paths.items():
-      self._dbusservice.add_path(
-        path, settings['initial'], gettextcallback=settings['textformat'], writeable=True, onchangecallback=self._handlechangedvalue)
-        
-    # Erst NACH allen add_path-Aufrufen registrieren
-    self._dbusservice.register()
+    self._deviceinstance = int(config['DEFAULT']['DeviceInstance'])
+    self._customname = config['DEFAULT']['CustomName']
+    self._role = config['DEFAULT']['Role']
+    self._productname = productname
+    self._connection = connection
+
+    if self._role != 'grid':
+        raise ValueError("Configured Role: %s is not supported. Only grid is supported." % self._role)
+
+    self._servicename = 'com.victronenergy.grid'
+    self._productid = 45069
+    self._position = self._getShellyPosition()
+    self._serial = self._getShellySerial()
+    self._updateIndex = 0
+    self._lastPower = self._paths['/Ac/Power']['initial']
+    self._dbusservice = self._createDbusService()
+
+    logging.debug("%s /DeviceInstance = %d" % (self._servicename, self._deviceinstance))
 
     # last update
     self._lastUpdate = 0
     self._lastSuccessfulUpdate = monotonic_time()
     self._communicationError = False
- 
+
     # add _update function 'timer'
     gobject.timeout_add(POLL_INTERVAL_MS, self._update)
     
     # add _signOfLife 'timer' to get feedback in log every 5minutes
     gobject.timeout_add(self._getSignOfLifeInterval()*60*1000, self._signOfLife)
+
+
+  def _createDbusService(self, measurements=None):
+    dbusservice = VeDbusService("{}.http_{:02d}".format(self._servicename, self._deviceinstance), register=False)
+
+    # Create the management objects, as specified in the ccgx dbus-api document
+    dbusservice.add_path('/Mgmt/ProcessName', __file__)
+    dbusservice.add_path('/Mgmt/ProcessVersion', 'Unkown version, and running on Python ' + platform.python_version())
+    dbusservice.add_path('/Mgmt/Connection', self._connection)
+
+    # Create the mandatory objects
+    dbusservice.add_path('/DeviceInstance', self._deviceinstance)
+    dbusservice.add_path('/ProductId', self._productid)
+    dbusservice.add_path('/DeviceType', 345) # found on https://www.sascha-curth.de/projekte/005_Color_Control_GX.html#experiment - should be an ET340 Engerie Meter
+    dbusservice.add_path('/ProductName', self._productname)
+    dbusservice.add_path('/CustomName', self._customname)
+    dbusservice.add_path('/Latency', None)
+    dbusservice.add_path('/FirmwareVersion', 0.2)
+    dbusservice.add_path('/HardwareVersion', 0)
+    dbusservice.add_path('/Connected', 1)
+    dbusservice.add_path('/Role', self._role)
+    dbusservice.add_path('/Position', self._position)
+    dbusservice.add_path('/Serial', self._serial)
+    dbusservice.add_path('/UpdateIndex', self._updateIndex)
+
+    # add path values to dbus
+    for path, settings in self._paths.items():
+      value = settings['initial'] if measurements is None else measurements[path]
+      dbusservice.add_path(path, value, gettextcallback=settings['textformat'])
+
+    # Erst NACH allen add_path-Aufrufen registrieren
+    dbusservice.register()
+    return dbusservice
  
   def _getShellySerial(self):
     meter_data = self._getShellyData()  
@@ -169,7 +173,7 @@ class DbusShelly3emService:
   def _signOfLife(self):
     logging.info("--- Start: sign of life ---")
     logging.info("Last _update() call: %s" % (self._lastUpdate))
-    logging.info("Last '/Ac/Power': %s" % (self._dbusservice['/Ac/Power']))
+    logging.info("Last '/Ac/Power': %s" % (self._lastPower))
     logging.info("--- End: sign of life ---")
     return True
  
@@ -198,6 +202,35 @@ class DbusShelly3emService:
     return phases
 
 
+  def _getMeasurements(self, meter_data, phases):
+    return {
+      '/Ac/Power': meter_data['em:0']['total_act_power'],
+      '/Ac/L1/Voltage': phases[0].voltage,
+      '/Ac/L2/Voltage': phases[1].voltage,
+      '/Ac/L3/Voltage': phases[2].voltage,
+      '/Ac/L1/Current': phases[0].current,
+      '/Ac/L2/Current': phases[1].current,
+      '/Ac/L3/Current': phases[2].current,
+      '/Ac/L1/Power': phases[0].power,
+      '/Ac/L2/Power': phases[1].power,
+      '/Ac/L3/Power': phases[2].power,
+      '/Ac/L1/Energy/Forward': phases[0].total_act_energy,
+      '/Ac/L2/Energy/Forward': phases[1].total_act_energy,
+      '/Ac/L3/Energy/Forward': phases[2].total_act_energy,
+      '/Ac/L1/Energy/Reverse': phases[0].total_act_ret_energy,
+      '/Ac/L2/Energy/Reverse': phases[1].total_act_ret_energy,
+      '/Ac/L3/Energy/Reverse': phases[2].total_act_ret_energy,
+      '/Ac/Energy/Forward': sum(phase.total_act_energy for phase in phases),
+      '/Ac/Energy/Reverse': sum(phase.total_act_ret_energy for phase in phases),
+    }
+
+
+  def _updateDbusValues(self, measurements):
+    for path, value in measurements.items():
+      self._dbusservice[path] = value
+    self._dbusservice['/UpdateIndex'] = self._updateIndex
+
+
   def _update(self):   
     try:
        try:
@@ -211,35 +244,25 @@ class DbusShelly3emService:
              self._communicationError = True
 
           if (monotonic_time() - self._lastSuccessfulUpdate > DISCONNECT_AFTER_SECONDS and
-              self._dbusservice['/Connected'] != 0):
+              self._dbusservice is not None):
              self._dbusservice['/Connected'] = 0
-             logging.error('No successful measurement from Shelly for more than %s seconds. Setting /Connected to 0.', DISCONNECT_AFTER_SECONDS)
+             self._dbusservice.__del__()
+             self._dbusservice = None
+             logging.error('No successful measurement from Shelly for more than %s seconds. Setting /Connected to 0 and disconnecting D-Bus service.', DISCONNECT_AFTER_SECONDS)
 
           return True
        
-       #send data to DBus
-       self._dbusservice['/Ac/Power'] = total_act_power # positive: consumption, negative: feed into grid
-       self._dbusservice['/Ac/L1/Voltage'] = phases[0].voltage
-       self._dbusservice['/Ac/L2/Voltage'] = phases[1].voltage
-       self._dbusservice['/Ac/L3/Voltage'] = phases[2].voltage
-       self._dbusservice['/Ac/L1/Current'] = phases[0].current
-       self._dbusservice['/Ac/L2/Current'] = phases[1].current
-       self._dbusservice['/Ac/L3/Current'] = phases[2].current
-       self._dbusservice['/Ac/L1/Power'] = phases[0].power
-       self._dbusservice['/Ac/L2/Power'] = phases[1].power
-       self._dbusservice['/Ac/L3/Power'] = phases[2].power
-       self._dbusservice['/Ac/L1/Energy/Forward'] = phases[0].total_act_energy
-       self._dbusservice['/Ac/L2/Energy/Forward'] = phases[1].total_act_energy
-       self._dbusservice['/Ac/L3/Energy/Forward'] = phases[2].total_act_energy
-       self._dbusservice['/Ac/L1/Energy/Reverse'] = phases[0].total_act_ret_energy 
-       self._dbusservice['/Ac/L2/Energy/Reverse'] = phases[1].total_act_ret_energy 
-       self._dbusservice['/Ac/L3/Energy/Reverse'] = phases[2].total_act_ret_energy 
-       self._dbusservice['/Ac/Energy/Forward'] = sum(phase.total_act_energy for phase in phases)
-       self._dbusservice['/Ac/Energy/Reverse'] = sum(phase.total_act_ret_energy for phase in phases)
+       measurements = self._getMeasurements(meter_data, phases)
+       self._updateIndex = (self._updateIndex + 1) % 256
+       if self._dbusservice is None:
+          self._dbusservice = self._createDbusService(measurements)
+       else:
+          self._updateDbusValues(measurements)
+          if self._dbusservice['/Connected'] != 1:
+             self._dbusservice['/Connected'] = 1
 
+       self._lastPower = total_act_power
        self._lastSuccessfulUpdate = monotonic_time()
-       if self._dbusservice['/Connected'] != 1:
-          self._dbusservice['/Connected'] = 1
        if self._communicationError:
           logging.info('Communication with Shelly restored.')
           self._communicationError = False
@@ -250,9 +273,6 @@ class DbusShelly3emService:
        logging.debug("House Forward (/Ac/Energy/Forward): %s" % (self._dbusservice['/Ac/Energy/Forward']))
        logging.debug("House Reverse (/Ac/Energy/Reverse): %s" % (self._dbusservice['/Ac/Energy/Reverse']))
        logging.debug("---");
-       
-       # increment UpdateIndex - to show that new data is available an wrap
-       self._dbusservice['/UpdateIndex'] = (self._dbusservice['/UpdateIndex'] + 1 ) % 256
 
        #update lastupdate vars
        self._lastUpdate = time.time()
@@ -262,13 +282,6 @@ class DbusShelly3emService:
     # return true, otherwise add_timeout will be removed from GObject - see docs http://library.isr.ist.utl.pt/docs/pygtk2reference/gobject-functions.html#function-gobject--timeout-add
     return True
  
-  def _handlechangedvalue(self, path, value):
-    logging.debug("someone else updated %s to %s" % (path, value))
-    return True # accept the change
-
-
-
-
 def getLogLevel():
   config = configparser.ConfigParser()
   config.read("%s/config.ini" % (os.path.dirname(os.path.realpath(__file__))))
@@ -311,9 +324,6 @@ def main():
           '/Ac/Energy/Forward': {'initial': 0, 'textformat': _kwh}, # energy bought from the grid
           '/Ac/Energy/Reverse': {'initial': 0, 'textformat': _kwh}, # energy sold to the grid
           '/Ac/Power': {'initial': 0, 'textformat': _w},
-          
-          '/Ac/Current': {'initial': 0, 'textformat': _a},
-          '/Ac/Voltage': {'initial': 0, 'textformat': _v},
           
           '/Ac/L1/Voltage': {'initial': 0, 'textformat': _v},
           '/Ac/L2/Voltage': {'initial': 0, 'textformat': _v},
