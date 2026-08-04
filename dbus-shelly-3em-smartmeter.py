@@ -53,16 +53,20 @@ class DbusShelly3emService:
     self._servicename = 'com.victronenergy.grid'
     self._productid = 45069
     self._position = self._getShellyPosition()
-    self._serial = self._getShellySerial()
+    initial_meter_data = self._getShellyData()
+    self._serial = self._getShellySerial(initial_meter_data)
+    initial_phases = self._getPhases(initial_meter_data)
+    initial_measurements = self._getMeasurements(initial_meter_data, initial_phases)
+    initial_update_time = monotonic_time()
     self._updateIndex = 0
-    self._lastPower = self._paths['/Ac/Power']['initial']
-    self._dbusservice = self._createDbusService()
+    self._lastPower = initial_measurements['/Ac/Power']
+    self._dbusservice = self._createDbusService(initial_measurements)
 
     logging.debug("%s /DeviceInstance = %d" % (self._servicename, self._deviceinstance))
 
     # last update
     self._lastUpdate = 0
-    self._lastSuccessfulUpdate = monotonic_time()
+    self._lastSuccessfulUpdate = initial_update_time
     self._communicationError = False
 
     # add _update function 'timer'
@@ -72,7 +76,7 @@ class DbusShelly3emService:
     gobject.timeout_add(self._getSignOfLifeInterval()*60*1000, self._signOfLife)
 
 
-  def _createDbusService(self, measurements=None):
+  def _createDbusService(self, measurements):
     dbusservice = VeDbusService("{}.http_{:02d}".format(self._servicename, self._deviceinstance), register=False)
 
     # Create the management objects, as specified in the ccgx dbus-api document
@@ -97,16 +101,13 @@ class DbusShelly3emService:
 
     # add path values to dbus
     for path, settings in self._paths.items():
-      value = settings['initial'] if measurements is None else measurements[path]
-      dbusservice.add_path(path, value, gettextcallback=settings['textformat'])
+      dbusservice.add_path(path, measurements[path], gettextcallback=settings['textformat'])
 
     # Erst NACH allen add_path-Aufrufen registrieren
     dbusservice.register()
     return dbusservice
  
-  def _getShellySerial(self):
-    meter_data = self._getShellyData()  
-    
+  def _getShellySerial(self, meter_data):
     if not meter_data['sys']['mac']:
         raise ValueError("Response does not contain 'mac' attribute")
     
