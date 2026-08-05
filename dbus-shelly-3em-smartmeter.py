@@ -3,6 +3,7 @@
 
 # import normal packages
 import platform 
+import math
 import logging
 import logging.handlers
 import sys
@@ -28,10 +29,11 @@ from vedbus import VeDbusService
 
 
 class Phase:
-  def __init__(self, voltage, current, power, total_act_energy, total_act_ret_energy):
+  def __init__(self, voltage, current, power, power_factor, total_act_energy, total_act_ret_energy):
     self.voltage = voltage
     self.current = current
     self.power = power
+    self.power_factor = power_factor
     self.total_act_energy = total_act_energy / 1000
     self.total_act_ret_energy = total_act_ret_energy / 1000
 
@@ -51,8 +53,7 @@ class DbusShelly3emService:
         raise ValueError("Configured Role: %s is not supported. Only grid is supported." % self._role)
 
     self._servicename = 'com.victronenergy.grid'
-    self._productid = 45069
-    self._position = self._getShellyPosition()
+    self._productid = 0xB034
     self._serial = None
     self._updateIndex = 0
     self._lastPower = None
@@ -83,7 +84,7 @@ class DbusShelly3emService:
     # Create the mandatory objects
     dbusservice.add_path('/DeviceInstance', self._deviceinstance)
     dbusservice.add_path('/ProductId', self._productid)
-    dbusservice.add_path('/DeviceType', 345) # found on https://www.sascha-curth.de/projekte/005_Color_Control_GX.html#experiment - should be an ET340 Engerie Meter
+    dbusservice.add_path('/DeviceType', 0)
     dbusservice.add_path('/ProductName', self._productname)
     dbusservice.add_path('/CustomName', self._customname)
     dbusservice.add_path('/Latency', None)
@@ -91,9 +92,9 @@ class DbusShelly3emService:
     dbusservice.add_path('/HardwareVersion', 0)
     dbusservice.add_path('/Connected', 1)
     dbusservice.add_path('/Role', self._role)
-    dbusservice.add_path('/Position', self._position)
     dbusservice.add_path('/Serial', self._serial)
     dbusservice.add_path('/UpdateIndex', self._updateIndex)
+    dbusservice.add_path('/ErrorCode', 0)
 
     # add path values to dbus
     for path, settings in self._paths.items():
@@ -120,16 +121,6 @@ class DbusShelly3emService:
   def _getSignOfLifeInterval(self):
     config = self._getConfig()
     value = config['DEFAULT']['SignOfLifeLog']
-    
-    if not value: 
-        value = 0
-    
-    return int(value)
- 
- 
-  def _getShellyPosition(self):
-    config = self._getConfig()
-    value = config['DEFAULT']['Position']
     
     if not value: 
         value = 0
@@ -178,9 +169,9 @@ class DbusShelly3emService:
   def _getPhases(self, meter_data):
     em0 = meter_data['em:0']
     emdata0 = meter_data['emdata:0']
-    l1 = Phase(em0['a_voltage'], em0['a_current'], em0['a_act_power'], emdata0['a_total_act_energy'], emdata0['a_total_act_ret_energy'])
-    l2 = Phase(em0['b_voltage'], em0['b_current'], em0['b_act_power'], emdata0['b_total_act_energy'], emdata0['b_total_act_ret_energy'])
-    l3 = Phase(em0['c_voltage'], em0['c_current'], em0['c_act_power'], emdata0['c_total_act_energy'], emdata0['c_total_act_ret_energy'])
+    l1 = Phase(em0['a_voltage'], em0['a_current'], em0['a_act_power'], em0['a_pf'], emdata0['a_total_act_energy'], emdata0['a_total_act_ret_energy'])
+    l2 = Phase(em0['b_voltage'], em0['b_current'], em0['b_act_power'], em0['b_pf'], emdata0['b_total_act_energy'], emdata0['b_total_act_ret_energy'])
+    l3 = Phase(em0['c_voltage'], em0['c_current'], em0['c_act_power'], em0['c_pf'], emdata0['c_total_act_energy'], emdata0['c_total_act_ret_energy'])
 
     phases = [l1, l2, l3]
 
@@ -200,8 +191,17 @@ class DbusShelly3emService:
 
 
   def _getMeasurements(self, meter_data, phases):
+    total_act_power = meter_data['em:0']['total_act_power']
+    total_aprt_power = meter_data['em:0'].get('total_aprt_power')
+    total_power_factor = None
+    if (isinstance(total_act_power, (int, float)) and not isinstance(total_act_power, bool) and
+        isinstance(total_aprt_power, (int, float)) and not isinstance(total_aprt_power, bool) and
+        math.isfinite(total_act_power) and math.isfinite(total_aprt_power) and total_aprt_power != 0):
+      total_power_factor = total_act_power / total_aprt_power
+
     return {
-      '/Ac/Power': meter_data['em:0']['total_act_power'],
+      '/Ac/Power': total_act_power,
+      '/Ac/PowerFactor': total_power_factor,
       '/Ac/L1/Voltage': phases[0].voltage,
       '/Ac/L2/Voltage': phases[1].voltage,
       '/Ac/L3/Voltage': phases[2].voltage,
@@ -211,14 +211,17 @@ class DbusShelly3emService:
       '/Ac/L1/Power': phases[0].power,
       '/Ac/L2/Power': phases[1].power,
       '/Ac/L3/Power': phases[2].power,
+      '/Ac/L1/PowerFactor': phases[0].power_factor,
+      '/Ac/L2/PowerFactor': phases[1].power_factor,
+      '/Ac/L3/PowerFactor': phases[2].power_factor,
       '/Ac/L1/Energy/Forward': phases[0].total_act_energy,
       '/Ac/L2/Energy/Forward': phases[1].total_act_energy,
       '/Ac/L3/Energy/Forward': phases[2].total_act_energy,
       '/Ac/L1/Energy/Reverse': phases[0].total_act_ret_energy,
       '/Ac/L2/Energy/Reverse': phases[1].total_act_ret_energy,
       '/Ac/L3/Energy/Reverse': phases[2].total_act_ret_energy,
-      '/Ac/Energy/Forward': sum(phase.total_act_energy for phase in phases),
-      '/Ac/Energy/Reverse': sum(phase.total_act_ret_energy for phase in phases),
+      '/Ac/Energy/Forward': meter_data['emdata:0']['total_act'] / 1000,
+      '/Ac/Energy/Reverse': meter_data['emdata:0']['total_act_ret'] / 1000,
     }
 
 
@@ -316,7 +319,8 @@ def main():
       _kwh = lambda p, v: (str(round(v, 2)) + ' kWh')
       _a = lambda p, v: (str(round(v, 1)) + ' A')
       _w = lambda p, v: (str(round(v, 1)) + ' W')
-      _v = lambda p, v: (str(round(v, 1)) + ' V')   
+      _v = lambda p, v: (str(round(v, 1)) + ' V')
+      _pf = lambda p, v: str(round(v, 3))
      
       #start our main-service
       pvac_output = DbusShelly3emService(
@@ -324,6 +328,7 @@ def main():
           '/Ac/Energy/Forward': {'initial': 0, 'textformat': _kwh}, # energy bought from the grid
           '/Ac/Energy/Reverse': {'initial': 0, 'textformat': _kwh}, # energy sold to the grid
           '/Ac/Power': {'initial': 0, 'textformat': _w},
+          '/Ac/PowerFactor': {'initial': None, 'textformat': _pf},
           
           '/Ac/L1/Voltage': {'initial': 0, 'textformat': _v},
           '/Ac/L2/Voltage': {'initial': 0, 'textformat': _v},
@@ -334,6 +339,9 @@ def main():
           '/Ac/L1/Power': {'initial': 0, 'textformat': _w},
           '/Ac/L2/Power': {'initial': 0, 'textformat': _w},
           '/Ac/L3/Power': {'initial': 0, 'textformat': _w},
+          '/Ac/L1/PowerFactor': {'initial': None, 'textformat': _pf},
+          '/Ac/L2/PowerFactor': {'initial': None, 'textformat': _pf},
+          '/Ac/L3/PowerFactor': {'initial': None, 'textformat': _pf},
           '/Ac/L1/Energy/Forward': {'initial': 0, 'textformat': _kwh},
           '/Ac/L2/Energy/Forward': {'initial': 0, 'textformat': _kwh},
           '/Ac/L3/Energy/Forward': {'initial': 0, 'textformat': _kwh},
