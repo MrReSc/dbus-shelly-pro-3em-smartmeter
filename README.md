@@ -29,6 +29,13 @@ sudo dnf install python3-dbus python3-gobject python3-requests dbus-daemon
 ./local-test.sh
 ```
 
+Test the install and uninstall service transitions without root access or
+changing the host system:
+
+```sh
+python3 -m unittest tests/test_service_scripts.py
+```
+
 Run the test from a Git checkout. The script initializes the `velib_python` submodule when needed, starts the unchanged driver on an isolated D-Bus session and displays every path returned by D-Bus, including its raw value, formatted text and D-Bus type. It does not use the laptop's system D-Bus.
 
 Start the test while the Shelly is reachable. To verify the communication handling, disconnect the Shelly for more than two seconds and reconnect it. The test reports the D-Bus service disappearing and returning with current values. Press `Ctrl+C` to stop and display a summary.

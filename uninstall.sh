@@ -21,3 +21,10 @@ for LINK in "$PERSISTENT_LINK" "$RUNTIME_LINK"; do
 done
 
 [ ! -f "$RC_LOCAL" ] || sed -i "\|^$SCRIPT_DIR/install.sh$|d" "$RC_LOCAL"
+
+# The supervisors keep running after their service link disappears. Ask both
+# the driver and logger supervisors to exit so uninstall does not leave orphan
+# processes behind. These paths remain usable through SERVICE_DIR after the
+# links above have been removed.
+svc -dx "$SERVICE_DIR" 2>/dev/null || true
+svc -dx "$SERVICE_DIR/log" 2>/dev/null || true
