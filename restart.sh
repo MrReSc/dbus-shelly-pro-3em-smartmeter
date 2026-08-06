@@ -1,4 +1,6 @@
-#!/bin/bash
-SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+#!/bin/sh
+set -eu
 
-kill $(pgrep -f "python $SCRIPT_DIR/dbus-shelly-3em-smartmeter.py")
+SERVICE=/service/dbus-shelly-pro-3em-smartmeter
+[ -d "$SERVICE" ] || { echo "Error: service is not installed." >&2; exit 1; }
+exec svc -t "$SERVICE"

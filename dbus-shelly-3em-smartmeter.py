@@ -5,7 +5,6 @@
 import platform 
 import math
 import logging
-import logging.handlers
 import sys
 import os
 import sys
@@ -300,13 +299,8 @@ def getLogLevel():
 
 def main():
   #configure logging
-  logging.basicConfig(      format='%(asctime)s,%(msecs)d %(name)s %(levelname)s %(message)s',
-                            datefmt='%Y-%m-%d %H:%M:%S',
-                            level=getLogLevel(),
-                            handlers=[
-                                logging.FileHandler("%s/current.log" % (os.path.dirname(os.path.realpath(__file__)))),
-                                logging.StreamHandler()
-                            ])
+  logging.basicConfig(format='%(name)s %(levelname)s %(message)s',
+                      level=getLogLevel())
  
   try:
       logging.info("Start");
